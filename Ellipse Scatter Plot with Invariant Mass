@@ -1,0 +1,155 @@
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# -------------------------------
+# Invariant mass helper
+# -------------------------------
+def invariant_mass(pt, eta, phi, mass):
+    px = pt * np.cos(phi)
+    py = pt * np.sin(phi)
+    pz = pt * np.sinh(eta)
+    E  = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
+
+    px_sum = np.sum(px)
+    py_sum = np.sum(py)
+    pz_sum = np.sum(pz)
+    E_sum  = np.sum(E)
+
+    arg = E_sum**2 - (px_sum**2 + py_sum**2 + pz_sum**2)
+    return np.sqrt(max(arg, 0.0))
+
+
+# -------------------------------
+# Load NanoAOD events
+# -------------------------------
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+gen = events.GenPart
+
+# -------------------------------
+# Select event with dark quarks + photons
+# -------------------------------
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+ph_mask = (gen.pdgId == 22) & (gen.status == 1)
+
+good_event_indices = ak.where(ak.any(dq_mask, axis=1) & ak.any(ph_mask, axis=1))[0]
+i = int(good_event_indices[0])
+print("Using event index:", i)
+
+# -------------------------------
+# Extract dark quarks + photons
+# -------------------------------
+dq_mask_i = dq_mask[i]
+dq_eta_i  = ak.to_numpy(gen.eta[i][dq_mask_i])
+dq_phi_i  = ak.to_numpy(gen.phi[i][dq_mask_i])
+dq_phi_i  = (dq_phi_i + np.pi) % (2*np.pi) - np.pi
+
+pf_mask_i = ph_mask[i]
+pf_eta_i = ak.to_numpy(gen.eta[i][pf_mask_i])
+pf_phi_i = ak.to_numpy(gen.phi[i][pf_mask_i])
+pf_phi_i = (pf_phi_i + np.pi) % (2*np.pi) - np.pi
+pf_pt_i  = ak.to_numpy(gen.pt[i][pf_mask_i])
+
+print("Dark quarks:", len(dq_eta_i))
+print("Gen photons:", len(pf_eta_i))
+
+# -------------------------------
+# ΔR matching to either dark quark
+# -------------------------------
+dR1 = np.sqrt((pf_eta_i - dq_eta_i[0])**2 +
+              ((pf_phi_i - dq_phi_i[0] + np.pi) % (2*np.pi) - np.pi)**2)
+
+dR2 = np.sqrt((pf_eta_i - dq_eta_i[1])**2 +
+              ((pf_phi_i - dq_phi_i[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+in_deltaR = (dR1 < 0.4) | (dR2 < 0.4)
+
+dr_eta = pf_eta_i[in_deltaR]
+dr_phi = pf_phi_i[in_deltaR]
+dr_pt  = pf_pt_i[in_deltaR]
+
+print("Photons inside ΔR < 0.4:", len(dr_pt))
+
+# -------------------------------
+# Ellipse around dark quarks
+# -------------------------------
+f1 = np.array([dq_eta_i[0], dq_phi_i[0]])
+f2 = np.array([dq_eta_i[1], dq_phi_i[1]])
+
+center = (f1 + f2) / 2
+dist_foci = np.linalg.norm(f2 - f1)
+a = (dist_foci + 2*0.5) / 2.0
+c = dist_foci / 2.0
+b = np.sqrt(a**2 - c**2)
+angle = np.degrees(np.arctan2(f2[1] - f1[1], f2[0] - f1[0]))
+
+# Ellipse membership for ALL photons
+dist1 = np.sqrt((pf_eta_i - f1[0])**2 +
+                ((pf_phi_i - f1[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+dist2 = np.sqrt((pf_eta_i - f2[0])**2 +
+                ((pf_phi_i - f2[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+inside_ellipse = (dist1 + dist2) < (2*a)
+
+ell_eta = pf_eta_i[inside_ellipse]
+ell_phi = pf_phi_i[inside_ellipse]
+ell_pt  = pf_pt_i[inside_ellipse]
+
+print("Photons inside ellipse:", len(ell_pt))
+
+# -------------------------------
+# Compute invariant masses
+# -------------------------------
+if len(dr_pt) > 0:
+    m_deltaR = invariant_mass(dr_pt, dr_eta, dr_phi, 0.0)
+    print("Invariant mass of photons inside ΔR < 0.4:", m_deltaR)
+
+if len(ell_pt) > 0:
+    m_ellipse = invariant_mass(ell_pt, ell_eta, ell_phi, 0.0)
+    print("Invariant mass of ALL photons inside ellipse:", m_ellipse)
+
+# -------------------------------
+# Plotting
+# -------------------------------
+plt.figure(figsize=(8,6))
+ax = plt.gca()
+
+# Dark quarks
+ax.scatter(dq_eta_i, dq_phi_i, s=80, color="black", marker="x", linewidths=2)
+
+# Circles around dark quarks
+for eta0, phi0 in zip(dq_eta_i, dq_phi_i):
+    ax.add_patch(plt.Circle((eta0, phi0), 0.4, color="red", fill=False, linewidth=1.5))
+
+# Ellipse
+ellipse = plt.matplotlib.patches.Ellipse(
+    xy=center, width=2*a, height=2*b, angle=angle,
+    fill=False, color="blue", linewidth=2, alpha=0.7
+)
+ax.add_patch(ellipse)
+
+# All photons
+sc = ax.scatter(pf_eta_i, pf_phi_i, s=25, c=pf_pt_i, cmap="viridis", alpha=0.8)
+plt.colorbar(sc, ax=ax).set_label("Photon $p_T$ [GeV]")
+
+ax.set_xlim(-np.pi, np.pi)
+ax.set_ylim(-np.pi, np.pi)
+ax.set_aspect('equal', adjustable='box')
+plt.xlabel("η")
+plt.ylabel("φ")
+plt.title(f"Event {i}: Gen Photons and Dark Quarks")
+plt.grid(True)
+plt.show()
