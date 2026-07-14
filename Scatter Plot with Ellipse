@@ -1,0 +1,209 @@
+#this code makes a scatter plot of photons and dark quarks and their position in space as given
+#by their  eta and phi. It also draws a red ring around the dark quarks at a radius of 0.4.
+#The pt (transverse momentum) of the photon is shown as a gradient, with darker colors 
+#corresponding to lower pt and lighter colors corresponding to higher pt. Also, it draws an ellipse around the 
+#two dark quark jets using them as focus points.
+#also ignore the fact that all of the variable names have pf, this code originally used pf photons
+#but now uses gen photons (from the gen particle collection). 
+
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+# Load NanoAOD-style events
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# Collections
+gen = events.GenPart
+
+
+# ------------------------------------------------------------
+# Find events with dark quarks
+# ------------------------------------------------------------
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+events_with_dq = ak.any(dq_mask, axis=1)
+
+# gen photons mask per event
+ph_mask = (
+    (gen.pdgId == 22) & (gen.status == 1)    # explicit photons
+)
+events_with_photons = ak.any(ph_mask, axis=1)
+
+# Events that have both dark quarks and gen photons
+good_event_indices = ak.where(events_with_dq & events_with_photons)[0]
+
+# Pick an event
+i = int(good_event_indices[1])
+print("Using event index:", i)
+
+# ------------------------------------------------------------
+# Dark quarks in event i
+# ------------------------------------------------------------
+dq_mask_i = (abs(gen.pdgId[i]) == 4900101) & (gen.status[i] == 23)
+dq_eta_i  = gen.eta[i][dq_mask_i]
+dq_phi_i  = gen.phi[i][dq_mask_i]
+
+print("Dark quarks:", len(dq_eta_i))
+
+# ------------------------------------------------------------
+# gen photons in event i
+# ------------------------------------------------------------
+pf_ph_mask_i = (
+    (gen.pdgId[i] == 22) & (gen.status[i] == 1) 
+)
+
+pf_eta_i = gen.eta[i][pf_ph_mask_i]
+pf_phi_i = gen.phi[i][pf_ph_mask_i]
+pf_pt_i  = gen.pt[i][pf_ph_mask_i]
+
+print("Gen photons:", len(pf_eta_i))
+
+# ------------------------------------------------------------
+# ΔR photons ↔ dark quarks
+# ------------------------------------------------------------
+deta_ph_dq = pf_eta_i[:, None] - dq_eta_i[None, :]
+dphi_ph_dq = (pf_phi_i[:, None] - dq_phi_i[None, :] + np.pi) % (2*np.pi) - np.pi
+dR_ph_dq   = np.sqrt(deta_ph_dq**2 + dphi_ph_dq**2)
+
+photon_matched_mask = ak.any(dR_ph_dq < 0.4, axis=1)
+
+matched_ph_eta_i = pf_eta_i[photon_matched_mask]
+matched_ph_phi_i = pf_phi_i[photon_matched_mask]
+matched_ph_pt    = pf_pt_i[photon_matched_mask]
+
+unmatched_ph_eta = pf_eta_i[~photon_matched_mask]
+unmatched_ph_phi = pf_phi_i[~photon_matched_mask]
+unmatched_ph_pt  = pf_pt_i[~photon_matched_mask]
+
+print(f"Pt of photons in dark quark radii:", matched_ph_pt)
+print(f"Pt of photons not in dark quark radii:", unmatched_ph_pt)
+
+
+print("PDG 22 / massless photons:", ak.sum(pf_ph_mask_i))
+print("Total Photons candidates:", len(pf_pt_i))
+#print("Unique PDG IDs:", np.unique(ak.to_numpy(pfc.pdgId[i])))
+
+# ------------------------------------------------------------
+# Plotting
+# ------------------------------------------------------------
+plt.figure(figsize=(8,6))
+ax = plt.gca()
+
+# Photons matched to dark quarks
+"""
+ax.scatter(
+    matched_ph_eta_i,
+    matched_ph_phi_i,
+    s=40,
+    color="red",
+    alpha=0.8,
+    label="Photons ΔR<0.4 to dark quark"
+)
+"""
+# Dark quarks
+ax.scatter(
+    dq_eta_i,
+    dq_phi_i,
+    s=80,
+    color="black",
+    marker="x",
+    linewidths=2,
+    label="Dark Quarks"
+)
+
+ax.set_xlim(-(np.pi), (np.pi))
+ax.set_ylim(-(np.pi), (np.pi))
+ax.set_aspect('equal', adjustable='box')
+
+# Circles around dark quarks
+for eta0, phi0 in zip(dq_eta_i, dq_phi_i):
+    circle = plt.Circle(
+        (eta0, phi0),
+        0.4,
+        color="red",
+        fill=False,
+        linewidth=1.5,
+        alpha=0.8
+    )
+    ax.add_patch(circle)
+
+# All photons
+sc = ax.scatter(
+    pf_eta_i,
+    pf_phi_i,
+    s=25,
+    c=pf_pt_i,          # <-- color by photon pT
+    cmap="viridis",     
+    alpha=0.8,
+    label="Gen Photons"
+)
+
+cbar = plt.colorbar(sc, ax=ax)
+cbar.set_label("Photon $p_T$ [GeV]")
+
+
+# ------------------------------------------------------------
+# Ellipse around the two dark quarks (using them as foci)
+# ------------------------------------------------------------
+if len(dq_eta_i) == 2:
+    # Foci
+    f1 = np.array([dq_eta_i[0], dq_phi_i[0]])
+    f2 = np.array([dq_eta_i[1], dq_phi_i[1]])
+
+    # Midpoint (ellipse center)
+    center = (f1 + f2) / 2
+
+    # Distance between foci
+    dist_foci = np.linalg.norm(f2 - f1)
+
+    # Choose ellipse major axis length:
+    # Here: 2a = distance between foci + 2*0.4
+    a = (dist_foci + 2*0.4) / 2.0
+
+    # c = half distance between foci
+    c = dist_foci / 2.0
+
+    # b = semi-minor axis
+    b = np.sqrt(a**2 - c**2)
+
+    # Rotation angle of ellipse (in degrees)
+    angle = np.degrees(np.arctan2(f2[1] - f1[1], f2[0] - f1[0]))
+
+    # Draw ellipse
+    ellipse = plt.matplotlib.patches.Ellipse(
+        xy=center,
+        width=2*a,
+        height=2*b,
+        angle=angle,
+        fill=False,
+        color="blue",
+        linewidth=2,
+        alpha=0.7,
+        label="Ellipse around dark quarks"
+    )
+    ax.add_patch(ellipse)
+else:
+    print("Ellipse requires exactly two dark quarks.")
+
+
+
+
+
+
+plt.xlabel("η")
+plt.ylabel("φ")
+plt.title(f"Event {i}: Gen Photons and Dark Quarks (ΔR < 0.4)")
+plt.grid(True)
+#plt.legend()
+plt.show()
