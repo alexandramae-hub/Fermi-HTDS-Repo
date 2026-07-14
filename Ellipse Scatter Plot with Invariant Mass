@@ -45,7 +45,7 @@ dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
 ph_mask = (gen.pdgId == 22) & (gen.status == 1)
 
 good_event_indices = ak.where(ak.any(dq_mask, axis=1) & ak.any(ph_mask, axis=1))[0]
-i = int(good_event_indices[0])
+i = int(good_event_indices[1])
 print("Using event index:", i)
 
 # -------------------------------
@@ -64,6 +64,16 @@ pf_pt_i  = ak.to_numpy(gen.pt[i][pf_mask_i])
 
 print("Dark quarks:", len(dq_eta_i))
 print("Gen photons:", len(pf_eta_i))
+
+# -------------------------------
+# Invariant mass of ALL photons
+# -------------------------------
+all_eta = pf_eta_i
+all_phi = pf_phi_i
+all_pt  = pf_pt_i
+
+m_all_photons = invariant_mass(all_pt, all_eta, all_phi, 0.0)
+print("Invariant mass of ALL photons:", m_all_photons)
 
 # -------------------------------
 # ΔR matching to either dark quark
