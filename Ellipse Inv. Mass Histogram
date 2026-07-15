@@ -1,0 +1,109 @@
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# -------------------------------
+# Load NanoAOD events
+# -------------------------------
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+gen = events.GenPart
+
+# -------------------------------
+# Masks for dark quarks and photons
+# -------------------------------
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+ph_mask = (gen.pdgId == 22) & (gen.status == 1)
+
+dq = gen[dq_mask]
+ph = gen[ph_mask]
+
+# -------------------------------
+# Event selection
+# -------------------------------
+has_two_dq = ak.num(dq, axis=1) == 2
+has_ph     = ak.num(ph, axis=1) > 0
+good_events = has_two_dq & has_ph
+
+# IMPORTANT: preserve event alignment
+dq = ak.mask(dq, good_events)
+ph = ak.mask(ph, good_events)
+
+# Remove None events
+dq = dq[good_events]
+ph = ph[good_events]
+
+# -------------------------------
+# Ellipse around dark quarks (per event)
+# -------------------------------
+f1_eta = dq.eta[:, 0]
+f1_phi = dq.phi[:, 0]
+f2_eta = dq.eta[:, 1]
+f2_phi = dq.phi[:, 1]
+
+# Distance between foci
+dphi_foci = (f2_phi - f1_phi + np.pi) % (2*np.pi) - np.pi
+dist_foci = np.sqrt((f2_eta - f1_eta)**2 + dphi_foci**2)
+
+# Ellipse parameters (same as your working per-event version)
+a = (dist_foci + 2*0.5) / 2.0
+c = dist_foci / 2.0
+b = np.sqrt(a**2 - c**2)
+
+# -------------------------------
+# Photons within ellipse
+# -------------------------------
+dphi1 = (ph.phi - f1_phi[:, None] + np.pi) % (2*np.pi) - np.pi
+dphi2 = (ph.phi - f2_phi[:, None] + np.pi) % (2*np.pi) - np.pi
+
+dist1 = np.sqrt((ph.eta - f1_eta[:, None])**2 + dphi1**2)
+dist2 = np.sqrt((ph.eta - f2_eta[:, None])**2 + dphi2**2)
+
+inside_ellipse = (dist1 + dist2) < (2 * a[:, None])
+
+ph_in_ellipse = ph[inside_ellipse]
+
+# -------------------------------
+# Invariant mass of photons in ellipse (columnar)
+# -------------------------------
+px = ph_in_ellipse.pt * np.cos(ph_in_ellipse.phi)
+py = ph_in_ellipse.pt * np.sin(ph_in_ellipse.phi)
+pz = ph_in_ellipse.pt * np.sinh(ph_in_ellipse.eta)
+E  = np.sqrt(px**2 + py**2 + pz**2)
+
+px_sum = ak.sum(px, axis=1)
+py_sum = ak.sum(py, axis=1)
+pz_sum = ak.sum(pz, axis=1)
+E_sum  = ak.sum(E,  axis=1)
+
+mass_sq = E_sum**2 - (px_sum**2 + py_sum**2 + pz_sum**2)
+masses = np.sqrt(ak.where(mass_sq > 0, mass_sq, 0.0))
+
+# Keep only events with ≥1 photon in ellipse
+valid = ak.num(ph_in_ellipse, axis=1) > 0
+masses = masses[valid]
+
+# -------------------------------
+# Histogram
+# -------------------------------
+mass_hist = hist.Hist.new.Reg(80, 0, 200, name="m", label="Invariant Mass [GeV]").Double()
+mass_hist.fill(m=masses)
+
+plt.figure(figsize=(8, 6))
+hep.histplot(mass_hist)
+plt.xlabel("Invariant Mass of Photons in Ellipse [GeV]")
+plt.ylabel("Events")
+plt.title("Invariant Mass of All Photons Inside Ellipse (All Events)")
+plt.grid(True)
+plt.show()
