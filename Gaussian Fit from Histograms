@@ -1,0 +1,45 @@
+#2-jet invariant masses gaussian code
+#now using the genpart collection
+
+import numpy as np
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+# --- Extract histogram data ---
+counts = mass_hist.values()
+bin_edges = mass_hist.axes[0].edges
+bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+
+# --- Define Gaussian ---
+def gaussian(x, A, mu, sigma):
+    return A * np.exp(-(x - mu)**2 / (2 * sigma**2))
+
+# --- Initial parameters ---
+A0 = np.max(counts)
+mu0 = bin_centers[np.argmax(counts)]
+sigma0 = 10.0
+
+popt, pcov = curve_fit(gaussian, bin_centers, counts, p0=[A0, mu0, sigma0])
+A_fit, mu_fit, sigma_fit = popt
+
+print("Fit results:")
+print("Amplitude =", A_fit)
+print("Mean =", mu_fit)
+print("Sigma =", sigma_fit)
+
+# --- Plot ---
+fig, ax = plt.subplots()
+
+# Histogram (step style)
+mass_hist.plot1d(ax=ax, histtype="step")
+
+# Gaussian curve
+x_fit = np.linspace(bin_edges[0], bin_edges[-1], 500)
+y_fit = gaussian(x_fit, *popt)
+ax.plot(x_fit, y_fit, color="red", label="Gaussian Fit")
+
+ax.set_ylabel("Count")
+ax.set_title("Matched 2-Jet Invariant Masses with Gaussian Fit")
+ax.legend()
+
+plt.show()
