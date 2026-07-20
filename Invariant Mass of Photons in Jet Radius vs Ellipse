@@ -1,0 +1,175 @@
+
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# ------------------------------------------------------------
+# Load events
+# ------------------------------------------------------------
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+# ------------------------------------------------------------
+# Trigger mask
+# ------------------------------------------------------------
+trigger_mask = (
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+)
+events = events[trigger_mask]
+
+gen     = events.GenPart
+jets    = events.GenJet
+photons = events.Photon
+
+# ------------------------------------------------------------
+# Dark quark selection
+# ------------------------------------------------------------
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+dq_eta  = gen.eta[dq_mask]
+dq_phi  = gen.phi[dq_mask]
+
+# Require exactly 2 dark quarks
+two_dq_mask = ak.num(dq_eta, axis=1) == 2
+
+events   = events[two_dq_mask]
+gen      = gen[two_dq_mask]
+jets     = jets[two_dq_mask]
+photons  = photons[two_dq_mask]
+dq_eta   = dq_eta[two_dq_mask]
+dq_phi   = dq_phi[two_dq_mask]
+
+# ------------------------------------------------------------
+# Jet ↔ dark quark ΔR matching (mask-based)
+# ------------------------------------------------------------
+deta_jdq = jets.eta[:, :, None] - dq_eta[:, None, :]
+dphi_jdq = (jets.phi[:, :, None] - dq_phi[:, None, :] + np.pi) % (2*np.pi) - np.pi
+dR_jdq   = np.sqrt(deta_jdq**2 + dphi_jdq**2)
+
+# Jets matched to at least one dark quark (ΔR < 0.4)
+jet_matched_mask = ak.any(dR_jdq < 0.4, axis=2)
+matched_jets     = jets[jet_matched_mask]
+
+# Require at least 1 matched jet per event
+has_matched = ak.num(matched_jets, axis=1) > 0
+
+dq_eta       = dq_eta[has_matched]
+dq_phi       = dq_phi[has_matched]
+matched_jets = matched_jets[has_matched]
+photons      = photons[has_matched]
+
+# ------------------------------------------------------------
+# Histograms for invariant masses
+# ------------------------------------------------------------
+hist_mass_jet = hist.Hist(
+    hist.axis.Regular(80, 0, 200, name="mjet", label="Photon mass in jet cone [GeV]")
+)
+
+hist_mass_ellipse = hist.Hist(
+    hist.axis.Regular(80, 0, 200, name="mell", label="Photon mass in ellipse [GeV]")
+)
+
+# ------------------------------------------------------------
+# Loop over events
+# ------------------------------------------------------------
+for i in range(len(dq_eta)):
+
+    # --- Dark quark foci ---
+    dq_eta_i = ak.to_numpy(dq_eta[i])
+    dq_phi_i = ((ak.to_numpy(dq_phi[i]) + np.pi) % (2*np.pi)) - np.pi
+
+    f1 = np.array([dq_eta_i[0], dq_phi_i[0]])
+    f2 = np.array([dq_eta_i[1], dq_phi_i[1]])
+
+    dist_foci = np.linalg.norm(f2 - f1)
+    a = (dist_foci + 2*0.4) / 2.0
+    c = dist_foci / 2.0
+    b = np.sqrt(a**2 - c**2)
+
+    # --- Photons ---
+    ph_eta_i = ak.to_numpy(photons[i].eta)
+    ph_phi_i = ((ak.to_numpy(photons[i].phi) + np.pi) % (2*np.pi)) - np.pi
+    ph_pt_i  = ak.to_numpy(photons[i].pt)
+
+    # --- Jets matched to dark quarks ---
+    jet_eta_i = ak.to_numpy(matched_jets[i].eta)
+    jet_phi_i = ((ak.to_numpy(matched_jets[i].phi) + np.pi) % (2*np.pi)) - np.pi
+
+    # ------------------------------------------------------------
+    # Photons inside jet radius (ΔR < 0.4)
+    # ------------------------------------------------------------
+    dphi_j = (ph_phi_i[:, None] - jet_phi_i[None, :] + np.pi) % (2*np.pi) - np.pi
+    deta_j = ph_eta_i[:, None] - jet_eta_i[None, :]
+    dR_j   = np.sqrt(dphi_j**2 + deta_j**2)
+
+    ph_in_jet = np.any(dR_j < 0.4, axis=1)
+
+    # Invariant mass of photons inside jet cone
+    ph_eta_j = ph_eta_i[ph_in_jet]
+    ph_phi_j = ph_phi_i[ph_in_jet]
+    ph_pt_j  = ph_pt_i[ph_in_jet]
+
+    if len(ph_pt_j) > 0:
+        px = ph_pt_j * np.cos(ph_phi_j)
+        py = ph_pt_j * np.sin(ph_phi_j)
+        pz = ph_pt_j * np.sinh(ph_eta_j)
+        E  = ph_pt_j * np.cosh(ph_eta_j)
+
+        arg = (np.sum(E))**2 - (np.sum(px)**2 + np.sum(py)**2 + np.sum(pz)**2)
+        arg = max(arg, 0)
+        M_jet = np.sqrt(arg)
+        hist_mass_jet.fill(mjet=M_jet)
+
+    # ------------------------------------------------------------
+    # Photons inside ellipse (but NOT inside jets)
+    # ------------------------------------------------------------
+    dist1 = np.sqrt((ph_eta_i - f1[0])**2 +
+                    ((ph_phi_i - f1[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+    dist2 = np.sqrt((ph_eta_i - f2[0])**2 +
+                    ((ph_phi_i - f2[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+    inside_ellipse = (dist1 + dist2) < (2*a)
+   
+    # INclude photons inside jets
+    ph_in_ellipse = inside_ellipse # & (~ph_in_jet)
+
+    ph_eta_e = ph_eta_i[ph_in_ellipse]
+    ph_phi_e = ph_phi_i[ph_in_ellipse]
+    ph_pt_e  = ph_pt_i[ph_in_ellipse]
+    
+    if len(ph_pt_e) > 0:
+        px = ph_pt_e * np.cos(ph_phi_e)
+        py = ph_pt_e * np.sin(ph_phi_e)
+        pz = ph_pt_e * np.sinh(ph_eta_e)
+        E  = ph_pt_e * np.cosh(ph_eta_e)
+
+        arg = (np.sum(E))**2 - (np.sum(px)**2 + np.sum(py)**2 + np.sum(pz)**2)
+        arg = max(arg, 0)
+        M_ellipse = np.sqrt(arg)
+        hist_mass_ellipse.fill(mell=M_ellipse)
+
+# ------------------------------------------------------------
+# Plot both histograms
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(8,6))
+
+hist_mass_jet.plot1d(ax=ax, label="Photon mass in jet cone (ΔR < 0.4)", color="blue")
+hist_mass_ellipse.plot1d(ax=ax, label="Photon mass in ellipse (outside jets)", color="red")
+
+ax.set_xlabel("Invariant Mass [GeV]")
+ax.set_ylabel("Events")
+ax.set_title("Photon Invariant Mass: Jet Cone vs Ellipse")
+ax.legend()
+
+plt.show()
