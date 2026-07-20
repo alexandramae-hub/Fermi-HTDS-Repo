@@ -1,0 +1,173 @@
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# ------------------------------------------------------------
+# Load events
+# ------------------------------------------------------------
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+jets = events.Jet
+photons = events.Photon
+
+# ------------------------------------------------------------
+# Trigger mask
+# ------------------------------------------------------------
+trigger_mask = (
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+)
+
+# Apply trigger selection
+events = events[trigger_mask]
+jets = jets[trigger_mask]
+photons = photons[trigger_mask]
+
+# ------------------------------------------------------------
+# Select the two jets with the highest neutral EM fraction
+# ------------------------------------------------------------
+
+# Sort jets by neutral EM fraction
+order = ak.argsort(jets.neEmEF, ascending=False)
+jets_sorted = jets[order]
+
+# Require at least 2 jets BEFORE slicing
+has_two_jets = ak.num(jets_sorted, axis=1) >= 2
+
+jets_sorted = jets_sorted[has_two_jets]
+photons_sel = photons[has_two_jets]
+
+# Now safely take the top 2 jets
+jets_top2 = jets_sorted[:, :2]
+
+# Require both jets have neEmEF > 0.95
+valid_twojets = (
+    (jets_top2.neEmEF[:, 0] > 0.975)
+    & (jets_top2.neEmEF[:, 1] > 0.975)
+)
+
+jets_sel = jets_top2[valid_twojets]
+photons_sel = photons_sel[valid_twojets]
+
+# ------------------------------------------------------------
+# Histogram
+# ------------------------------------------------------------
+h = hist.Hist(
+    hist.axis.Regular(80, 0, 400, name="mass", label="M(jj + photons in ellipse) [GeV]")
+)
+
+# ------------------------------------------------------------
+# Event loop
+# ------------------------------------------------------------
+for j, ph in zip(jets_sel, photons_sel):
+
+    if len(j) < 2:
+        continue
+
+    # Take the two highest-pt jets
+    order = ak.argsort(j.pt, ascending=False)
+    j1 = j[order[0]]
+    j2 = j[order[1]]
+
+    # Jet four-vectors
+    def fourvec(pt, eta, phi, mass):
+        px = pt * np.cos(phi)
+        py = pt * np.sin(phi)
+        pz = pt * np.sinh(eta)
+        E  = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
+        return px, py, pz, E
+
+    j1_px, j1_py, j1_pz, j1_E = fourvec(j1.pt, j1.eta, j1.phi, j1.mass)
+    j2_px, j2_py, j2_pz, j2_E = fourvec(j2.pt, j2.eta, j2.phi, j2.mass)
+
+    # Invariant mass of the two jets
+    jj_px = j1_px + j2_px
+    jj_py = j1_py + j2_py
+    jj_pz = j1_pz + j2_pz
+    jj_E  = j1_E + j2_E
+
+    M_jj = np.sqrt(jj_E**2 - (jj_px**2 + jj_py**2 + jj_pz**2))
+
+    # ------------------------------------------------------------
+    # Photons inside ellipse
+    # ------------------------------------------------------------
+    ph_eta = ak.to_numpy(ph.eta)
+    ph_phi = ak.to_numpy((ph.phi + np.pi) % (2*np.pi) - np.pi)
+    ph_pt  = ak.to_numpy(ph.pt)
+
+    # Distances to ellipse foci
+    dist1 = np.sqrt((ph_eta - f1[0])**2 +
+                ((ph_phi - f1[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+    dist2 = np.sqrt((ph_eta - f2[0])**2 +
+                ((ph_phi - f2[1] + np.pi) % (2*np.pi) - np.pi)**2)
+
+    inside_ellipse = (dist1 + dist2) < (2*a)
+
+    # ------------------------------------------------------------
+    # Exclude photons inside either jet (ΔR < 0.4)
+    # ------------------------------------------------------------
+    def deltaR(eta1, phi1, eta2, phi2):
+        dphi = (phi1 - phi2 + np.pi) % (2*np.pi) - np.pi
+        return np.sqrt((eta1 - eta2)**2 + dphi**2)
+
+    dR_j1 = deltaR(ph_eta, ph_phi, j1.eta, j1.phi)
+    dR_j2 = deltaR(ph_eta, ph_phi, j2.eta, j2.phi)
+
+    outside_jets = (dR_j1 > 0.4) & (dR_j2 > 0.4)
+
+    # ------------------------------------------------------------
+    # Final photon selection: inside ellipse AND outside jets
+    # ------------------------------------------------------------
+    final_mask = inside_ellipse & outside_jets
+
+    ph_eta_in = ph_eta[final_mask]
+    ph_phi_in = ph_phi[final_mask]
+    ph_pt_in  = ph_pt[final_mask]
+
+
+    # ------------------------------------------------------------
+    # Invariant mass of photons inside ellipse
+    # ------------------------------------------------------------
+    if len(ph_pt_in) > 0:
+        ph_px = ph_pt_in * np.cos(ph_phi_in)
+        ph_py = ph_pt_in * np.sin(ph_phi_in)
+        ph_pz = ph_pt_in * np.sinh(ph_eta_in)
+        ph_E  = ph_pt_in * np.cosh(ph_eta_in)
+
+        ph_px_sum = np.sum(ph_px)
+        ph_py_sum = np.sum(ph_py)
+        ph_pz_sum = np.sum(ph_pz)
+        ph_E_sum  = np.sum(ph_E)
+
+        arg = ph_E_sum**2 - (ph_px_sum**2 + ph_py_sum**2 + ph_pz_sum**2)
+        arg = max(arg, 0)
+        M_ph = np.sqrt(arg)
+    else:
+        M_ph = 0.0
+
+    # ------------------------------------------------------------
+    # Fill histogram with M(jj) + M(photons)
+    # ------------------------------------------------------------
+    h.fill(mass=M_jj + M_ph)
+
+# ------------------------------------------------------------
+# Plot histogram
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(8,6))
+hep.histplot(h, ax=ax)
+ax.set_xlabel("Invariant Mass [GeV]")
+ax.set_ylabel("Events")
+ax.set_title("Dijet + Ellipse Photons Invariant Mass")
+plt.show()
