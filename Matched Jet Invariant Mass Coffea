@@ -1,0 +1,92 @@
+#code for two-jet invariant masses of matched jets (including dark quarks)
+#using coffea and nanoaod
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+# Load NanoAOD-style events
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# Trigger mask
+trigger_mask = (
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+)
+
+triggered_events = events[trigger_mask] 
+
+gen = triggered_events.GenPart
+
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+
+dq_eta = gen.eta[dq_mask]
+dq_phi = gen.phi[dq_mask]
+
+jets = triggered_events.Jet
+
+deta = jets.eta[:, :, None] - dq_eta[:, None, :]
+dphi = (jets.phi[:, :, None] - dq_phi[:, None, :] + np.pi) % (2*np.pi) - np.pi
+dR   = np.sqrt(deta**2 + dphi**2)
+
+best_jet_idx = ak.argmin(dR, axis=1)
+best_dR      = ak.min(dR, axis=1)
+
+matched = (
+    (best_dR < 0.4) &
+    (jets.neEmEF[best_jet_idx] > 0.975) &
+    (jets.nConstituents[best_jet_idx] > 2)
+)
+
+matched_jets = jets[best_jet_idx][matched]
+
+two_or_more = ak.num(matched_jets) >= 2
+matched_jets = matched_jets[two_or_more]
+
+order = ak.argsort(matched_jets.neEmEF, ascending=False)
+sorted_jets = matched_jets[order]
+
+jet1 = sorted_jets[:, 0]
+jet2 = sorted_jets[:, 1]
+
+
+vec1 = ak.zip({
+    "pt": jet1.pt,
+    "eta": jet1.eta,
+    "phi": jet1.phi,
+    "mass": jet1.mass,
+}, with_name="PtEtaPhiMLorentzVector")
+
+vec2 = ak.zip({
+    "pt": jet2.pt,
+    "eta": jet2.eta,
+    "phi": jet2.phi,
+    "mass": jet2.mass,
+}, with_name="PtEtaPhiMLorentzVector")
+
+dijet_mass = (vec1 + vec2).mass
+
+
+mass_hist = hist.Hist(
+    hist.axis.Regular(40, 0, 400, label="Invariant Mass [GeV]", name="mass"),
+)
+
+mass_hist.fill(mass=dijet_mass)
+
+fig, ax = plt.subplots()
+mass_hist.plot1d(ax=ax)
+
+ax.set_ylabel("Count")
+ax.set_title("Invariant Mass of Matched, High-neEmEF, >2-const Jets")
+
+plt.show()
