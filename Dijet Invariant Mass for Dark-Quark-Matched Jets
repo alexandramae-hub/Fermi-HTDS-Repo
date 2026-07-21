@@ -1,0 +1,160 @@
+#code for two-jet invariant masses of matched jets (including dark quarks)
+import uproot
+import awkward as ak
+import numpy as np
+import matplotlib.pyplot as plt
+import mplhep as hep
+import hist
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# Load file
+file = uproot.open("psd24.root")
+events = file["Events"]
+
+# Read branches
+
+
+pdgid = events['GenPart_pdgId'].array()
+mother_id = events['GenPart_genPartIdxMother'].array()
+eta = events['GenPart_eta'].array()
+phi = events['GenPart_phi'].array()
+statusFlag = events['GenPart_statusFlags'].array()
+status = events['GenPart_status'].array()
+pt = events['GenPart_pt'].array()
+mother_pdgid = pdgid[mother_id]
+
+
+
+dq_eta_ev = eta[(status == 23) * (pdgid == 4900101)]
+dq_phi_ev = phi[(status == 23) * (pdgid == 4900101)]
+
+# Trigger mask (event-level)
+# --- Trigger mask (event-level) ---
+mask = (events['DST_PFScouting_JetHT'].array() |
+        events['DST_PFScouting_DoubleEG'].array())
+
+# --- Mask GenPart branches (preserves jagged structure) ---
+pdgid_m  = events['GenPart_pdgId'].array()[mask]
+eta_m    = events['GenPart_eta'].array()[mask]
+phi_m    = events['GenPart_phi'].array()[mask]
+status_m = events['GenPart_status'].array()[mask]
+
+
+# --- Select dark quarks per event (jagged mask) ---
+dq_mask = (np.abs(pdgid_m) == 4900101) & (status_m == 23) #abs (absolute value) so it includes antiparticles of dark quarks (-pdgid)
+
+dq_eta_ev = eta_m[dq_mask]
+dq_phi_ev = phi_m[dq_mask]
+
+
+# --- Mask jets ---
+jet_pt     = events['Jet_pt'].array()[mask]
+jet_eta    = events['Jet_eta'].array()[mask]
+jet_phi    = events['Jet_phi'].array()[mask]
+jet_mass   = events['Jet_mass'].array()[mask]
+jet_neEmEF = events['Jet_neEmEF'].array()[mask]
+jet_nconst = events['Jet_nConstituents'].array()[mask]
+
+inv_mass = []
+
+
+# Loop over masked events
+
+
+
+for i in range(len(jet_pt)):
+    
+    # Skip events with no jets or no dark quarks
+    if len(jet_pt[i]) == 0 or len(dq_eta_ev[i]) == 0:
+        continue
+
+    # Convert jet arrays
+    j_pt     = np.asarray(jet_pt[i])
+    j_eta    = np.asarray(jet_eta[i])
+    j_phi    = np.asarray(jet_phi[i])
+    j_mass   = np.asarray(jet_mass[i])
+    j_neEmEF = np.asarray(jet_neEmEF[i])
+    j_nconst = np.asarray(jet_nconst[i])
+    matched_jets = []
+     
+    # Loop over dark quarks in this event
+    for q_eta, q_phi in zip(dq_eta_ev[i], dq_phi_ev[i]):
+    
+        # ΔR to all jets
+        deta = j_eta - float(q_eta)
+        dphi = j_phi - float(q_phi)
+        dphi = (dphi + np.pi) % (2*np.pi) - np.pi #makes sure phi angle is between -pi to pi
+        dR   = np.sqrt(deta**2 + dphi**2)
+    
+        best = int(np.argmin(dR)) #stores INDEX of minimum value of dR
+        
+        #print(f"Event {i}: n jets = {len(j_pt)}, n dark quarks = {len(dq_eta_ev[i])}")
+
+
+        # Jet matched to dark quark
+        if (dR[best] < 0.4) and (j_neEmEF[best] > 0.975) and (j_nconst[best] > 2) :
+            #for matched jets I should really only include dr[best] to get a more accurate picture of what
+            #the distribution of matched jets looks like
+            matched_jets.append(best)
+
+            #print(matched_jets)
+            
+            #(matched_jets)
+
+            # Apply jet selection
+            #if j_neEmEF[best] > 0.975 and j_nconst[best] > 2:
+            #print(matched_jets)
+    #if total_jets_now > 1:
+        #print("We are here 2")
+    
+    # Need at least two selected matched jets
+    if len(matched_jets) < 2:
+        continue #exit and go to the next iteration of the loop
+   
+    #else:
+        #print("We are here")
+    #otherwise...
+    
+    
+    # Take the two highest neutral EM fraction jets
+    order = np.argsort(j_neEmEF[matched_jets])[::-1] #sorts jets by neEmEf and stores the indices of the matched jets array
+    #remember, matched jets itself is the indicies of the jets
+    jet1 = matched_jets[order[0]] #index of jet that has highest neutral EM energy fraction
+    jet2 = matched_jets[order[1]] #index of jet that has second highest neutral EM energy fraction
+
+    # Build 4-vectors
+    def four_vector(pt, eta, phi, mass):
+        px = pt * np.cos(phi)
+        py = pt * np.sin(phi)
+        pz = pt * np.sinh(eta)
+        E  = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
+        return np.array([E, px, py, pz])
+
+    v1 = four_vector(j_pt[jet1], j_eta[jet1], j_phi[jet1], j_mass[jet1])
+    v2 = four_vector(j_pt[jet2], j_eta[jet2], j_phi[jet2], j_mass[jet2])
+
+    # Invariant mass
+    V = v1 + v2
+    E, px, py, pz = V
+    dijet_mass = np.sqrt(E**2 - (px**2 + py**2 + pz**2))
+
+    inv_mass.append(dijet_mass)
+    
+  
+mass_hist = hist.Hist(
+    hist.axis.Regular(40, 0, 400, label="Invariant Mass [GeV]", name="mass"),
+)
+
+#mass_hist.fill(inv_mass)
+mass_hist.fill(np.array(inv_mass))
+
+fig, ax = plt.subplots()
+mass_hist.plot1d(ax=ax)
+
+ax.set_ylabel("Count")
+ax.set_title("Invariant Mass of Matched, High-neEmEF, >2-const Jets")
+
+plt.show()
+
