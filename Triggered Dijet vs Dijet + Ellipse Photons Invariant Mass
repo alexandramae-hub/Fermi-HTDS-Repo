@@ -1,0 +1,124 @@
+#for triggered jets
+import hist
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+import matplotlib.pyplot as plt
+import mplhep as hep
+
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    mode="eager",
+).events()
+
+# Trigger mask
+events = events[
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+]
+
+jets = events.Jet
+photons = events.Photon
+
+# Jet selection
+mask = (jets.neEmEF > 0.975) & (jets.nConstituents > 2)
+jets_sel = jets[mask]
+
+# Require ≥2 jets
+good = ak.num(jets_sel) >= 2
+jets_sel = jets_sel[good]
+photons = photons[good]
+
+# Sort jets by neEmEF
+idx = ak.argsort(jets_sel.neEmEF, ascending=False)
+jets_sorted = jets_sel[idx][:, :2]
+
+# Convert jets to LorentzVectors (massless if needed)
+jets_lv = ak.zip(
+    {
+        "pt": jets_sorted.pt,
+        "eta": jets_sorted.eta,
+        "phi": jets_sorted.phi,
+        "mass": jets_sorted.mass,   # if missing, replace with zeros_like
+    },
+    with_name="LorentzVector"
+)
+
+j1 = jets_lv[:,0]
+j2 = jets_lv[:,1]
+
+# Build foci
+f1 = jets_sorted[:, 0]
+f2 = jets_sorted[:, 1]
+
+# Ellipse semi-major axis
+dist_foci = np.sqrt((f2.eta - f1.eta)**2 +
+                    ((f2.phi - f1.phi + np.pi) % (2*np.pi) - np.pi)**2)
+a = (dist_foci + 2*0.4) / 2
+
+# ΔR photon–jet
+deta = photons.eta[:, :, None] - jets_sorted.eta[:, None, :]
+dphi = (photons.phi[:, :, None] - jets_sorted.phi[:, None, :] + np.pi) % (2*np.pi) - np.pi
+dR = np.sqrt(deta**2 + dphi**2)
+ph_in_jet = ak.any(dR < 0.4, axis=2)
+
+# Ellipse selection
+def dphi(a, b):
+    return (a - b + np.pi) % (2*np.pi) - np.pi
+
+dist1 = np.sqrt((photons.eta - f1.eta)**2 + dphi(photons.phi, f1.phi)**2)
+dist2 = np.sqrt((photons.eta - f2.eta)**2 + dphi(photons.phi, f2.phi)**2)
+inside_ellipse = (dist1 + dist2) < (2*a)
+
+# Photons inside ellipse but NOT inside jets
+ph_ellipse = photons[inside_ellipse & ~ph_in_jet]
+
+# Convert ellipse photons to LorentzVectors (massless)
+ph_ellipse_lv = ak.zip(
+    {
+        "pt": ph_ellipse.pt,
+        "eta": ph_ellipse.eta,
+        "phi": ph_ellipse.phi,
+        "mass": ak.zeros_like(ph_ellipse.pt),
+    },
+    with_name="LorentzVector"
+)
+
+# Sum ellipse photons per event
+ellipse_lv = ph_ellipse_lv.sum()
+
+# TRUE invariant mass of jets + ellipse photons
+jj_lv = j1 + j2
+total_lv = jj_lv + ellipse_lv
+
+# Histograms
+hist_mass_dijet = hist.Hist(
+    hist.axis.Regular(30, 0, 250, name="m_dijet", label="Dijet Mass [GeV]")
+)
+
+hist_mass_jj_plus_ellipse = hist.Hist(
+    hist.axis.Regular(30, 0, 250, name="m_jj_ell", label="Jets + Ellipse Photons [GeV]")
+)
+
+hist_mass_dijet.fill(m_dijet=ak.to_numpy(jj_lv.mass))
+hist_mass_jj_plus_ellipse.fill(m_jj_ell=ak.to_numpy(total_lv.mass))
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+fig, ax = plt.subplots(figsize=(8, 6))
+
+hist_mass_dijet.plot1d(ax=ax, label="Dijet Mass", color="blue")
+hist_mass_jj_plus_ellipse.plot1d(ax=ax, label="Jets + Ellipse Photons", color="red")
+
+ax.set_xlabel("Invariant Mass [GeV]")
+ax.set_ylabel("Events")
+ax.set_title("Dijet vs Dijet + Ellipse Photons")
+ax.legend()
+
+plt.show()
