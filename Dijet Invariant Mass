@@ -1,0 +1,105 @@
+#actual working histogram code for 2=jet invariant masses for all jets in TRIGGERED events
+#NOT JUST MATCHED JETS
+
+import uproot
+import awkward as ak
+import numpy as np
+import matplotlib.pyplot as plt
+import mplhep as hep
+import hist
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# Load file
+file = uproot.open("psd24.root")
+events = file["Events"]
+
+# Read branches
+jet_pt     = file["Events"]["Jet_pt"].array()
+jet_eta    = file["Events"]["Jet_eta"].array()
+jet_phi    = file["Events"]["Jet_phi"].array()
+jet_mass   = file["Events"]["Jet_mass"].array()
+jet_neEmEF = file["Events"]["Jet_neEmEF"].array()
+jet_nconst = file["Events"]["Jet_nConstituents"].array()
+
+
+# Trigger mask (event-level)
+mask = (events['DST_PFScouting_JetHT'].array() |
+        events['DST_PFScouting_DoubleEG'].array())
+
+# Apply mask to all jet branches
+jet_pt_masked     = jet_pt[mask]
+jet_eta_masked    = jet_eta[mask]
+jet_phi_masked    = jet_phi[mask]
+jet_mass_masked   = jet_mass[mask]
+jet_neEmEF_masked = jet_neEmEF[mask]
+jet_nconst_masked = jet_nconst[mask]
+
+def four_vector(pt, eta, phi, mass):
+    px = pt * np.cos(phi)
+    py = pt * np.sin(phi)
+    pz = pt * np.sinh(eta)
+    E  = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
+    return np.array([E, px, py, pz])
+
+inv_mass = []
+
+# Loop over masked events
+for i in range(len(jet_pt_masked)):
+    
+    # Convert to numpy arrays
+    j_pt     = np.asarray(jet_pt_masked[i])
+    j_eta    = np.asarray(jet_eta_masked[i])
+    j_phi    = np.asarray(jet_phi_masked[i])
+    j_mass   = np.asarray(jet_mass_masked[i])
+    j_neEmEF = np.asarray(jet_neEmEF_masked[i])
+    j_nconst = np.asarray(jet_nconst_masked[i])
+
+    # Jet selection:
+    # neutral EM fraction > 0.975 and more than 2 particles
+    good = ((j_neEmEF > 0.975) & (j_nconst > 2))
+    
+    if np.sum(good) < 2:
+        continue
+    
+    j_pt_good = j_pt[good]
+    j_eta_good = j_eta[good]
+    j_phi_good = j_phi[good]
+    j_mass_good = j_mass[good]
+
+
+    # Sort jets by neutral EM fraction
+    order = np.argsort(j_neEmEF[good])[::-1]
+    jet1_idx, jet2_idx = order[:2]
+
+    # four vectors for finding combined invariant mass
+
+    v1 = four_vector(j_pt_good[jet1_idx], j_eta_good[jet1_idx],
+                j_phi_good[jet1_idx], j_mass_good[jet1_idx])
+
+    v2 = four_vector(j_pt_good[jet2_idx], j_eta_good[jet2_idx],
+                j_phi_good[jet2_idx], j_mass_good[jet2_idx])
+
+    V = v1 + v2
+    E, px, py, pz = V
+    dijet_mass = np.sqrt(E**2 - (px**2 + py**2 + pz**2))
+
+    inv_mass.append(dijet_mass)
+
+
+# Histogram plotting
+masshist = hist.Hist(
+    hist.axis.Regular(30, 0, 200, label="2-Jet Invariant Masses [GeV]", name="mass"),
+)
+
+masshist.fill(inv_mass)
+
+fig, ax = plt.subplots()
+masshist.plot1d(ax=ax)
+
+ax.set_ylabel("Count")
+ax.set_title("2-Jet Invariant Masses")
+ax.legend()
+
+plt.show()
