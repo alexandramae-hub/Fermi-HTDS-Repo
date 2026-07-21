@@ -1,0 +1,159 @@
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+import awkward as ak
+import numpy as np
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+hep.style.use("CMS")
+plt.style.use(hep.style.CMS)
+
+# ------------------------------------------------------------
+# Load events
+# ------------------------------------------------------------
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+# ------------------------------------------------------------
+# Trigger mask
+# ------------------------------------------------------------
+events = events[
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+]
+
+gen     = events.GenPart
+jets    = events.GenJet
+ph_mask = (gen.pdgId == 22)
+photons = gen[ph_mask]
+
+# ------------------------------------------------------------
+# Dark quark selection
+# ------------------------------------------------------------
+dq_mask = (abs(gen.pdgId) == 4900101) & (gen.status == 23)
+dq      = gen[dq_mask]
+
+two_dq_mask = ak.num(dq, axis=1) == 2
+events   = events[two_dq_mask]
+gen      = gen[two_dq_mask]
+jets     = jets[two_dq_mask]
+photons  = photons[two_dq_mask]
+dq       = dq[two_dq_mask]
+
+dq1 = dq[:, 0]
+dq2 = dq[:, 1]
+
+# ------------------------------------------------------------
+# Jet ↔ dark quark ΔR matching
+# ------------------------------------------------------------
+def dphi(a, b):
+    return (a - b + np.pi) % (2*np.pi) - np.pi
+
+deta_jdq = jets.eta[:, :, None] - dq.eta[:, None, :]
+dphi_jdq = dphi(jets.phi[:, :, None], dq.phi[:, None, :])
+dR_jdq   = np.sqrt(deta_jdq**2 + dphi_jdq**2)
+
+jet_matched_mask = ak.any(dR_jdq < 0.4, axis=2)
+matched_jets     = jets[jet_matched_mask]
+
+has_matched = ak.num(matched_jets, axis=1) >= 2
+dq          = dq[has_matched]
+dq1         = dq[:, 0]
+dq2         = dq[:, 1]
+matched_jets = matched_jets[has_matched]
+photons      = photons[has_matched]
+
+# ------------------------------------------------------------
+# Take two leading matched jets
+# ------------------------------------------------------------
+idx_j = ak.argsort(matched_jets.pt, ascending=False)
+matched_jets = matched_jets[idx_j][:, :2]
+
+j1 = matched_jets[:, 0]
+j2 = matched_jets[:, 1]
+
+# ------------------------------------------------------------
+# Photons inside jets (ΔR < 0.4)
+# ------------------------------------------------------------
+deta_phj = photons.eta[:, :, None] - matched_jets.eta[:, None, :]
+dphi_phj = dphi(photons.phi[:, :, None], matched_jets.phi[:, None, :])
+dR_phj   = np.sqrt(deta_phj**2 + dphi_phj**2)
+
+ph_in_jet = ak.any(dR_phj < 0.4, axis=2)
+
+# ------------------------------------------------------------
+# Ellipse geometry
+# ------------------------------------------------------------
+dist_foci = np.sqrt(
+    (dq2.eta - dq1.eta)**2 +
+    dphi(dq2.phi, dq1.phi)**2
+)
+a = (dist_foci + 2*0.4) / 2.0
+
+dist1 = np.sqrt(
+    (photons.eta - dq1.eta[:, None])**2 +
+    dphi(photons.phi, dq1.phi[:, None])**2
+)
+dist2 = np.sqrt(
+    (photons.eta - dq2.eta[:, None])**2 +
+    dphi(photons.phi, dq2.phi[:, None])**2
+)
+
+inside_ellipse = (dist1 + dist2) < (2 * a[:, None])
+
+# ------------------------------------------------------------
+# Ellipse photons excluding jet photons
+# ------------------------------------------------------------
+ph_ellipse = photons[inside_ellipse & ~ph_in_jet]
+
+# ------------------------------------------------------------
+# Lorentz vectors
+# ------------------------------------------------------------
+jj_lv = j1 + j2
+
+ph_ellipse_lv = ak.zip(
+    {
+        "pt": ph_ellipse.pt,
+        "eta": ph_ellipse.eta,
+        "phi": ph_ellipse.phi,
+        "mass": ak.zeros_like(ph_ellipse.pt),
+    },
+    with_name="LorentzVector"
+)
+
+ellipse_lv = ph_ellipse_lv.sum()
+
+total_lv = jj_lv + ellipse_lv
+
+# ------------------------------------------------------------
+# Histograms
+# ------------------------------------------------------------
+hist_mass_dijet = hist.Hist(
+    hist.axis.Regular(40, 0, 300, name="m_dijet", label="Dijet mass [GeV]")
+)
+
+hist_mass_jj_plus_ellipse = hist.Hist(
+    hist.axis.Regular(40, 0, 300, name="m_jj_ell", label="Jets + ellipse photons [GeV]")
+)
+
+hist_mass_dijet.fill(m_dijet=ak.to_numpy(jj_lv.mass))
+hist_mass_jj_plus_ellipse.fill(m_jj_ell=ak.to_numpy(total_lv.mass))
+
+# ------------------------------------------------------------
+# Plot
+# ------------------------------------------------------------
+fig, ax = plt.subplots(figsize=(8, 6))
+
+hist_mass_dijet.plot1d(ax=ax, label="Dijet mass (matched GenJets)", color="blue")
+hist_mass_jj_plus_ellipse.plot1d(ax=ax, label="Jets + ellipse photons", color="red")
+
+ax.set_xlabel("Invariant Mass [GeV]")
+ax.set_ylabel("Events")
+ax.set_title("Dijet vs Dijet + Ellipse Photons")
+ax.legend()
+
+plt.show()
