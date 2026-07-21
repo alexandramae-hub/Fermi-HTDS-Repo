@@ -1,0 +1,81 @@
+#actual working histogram code for 2-jet invariant masses for all jets in TRIGGERED events
+#NOT JUST MATCHED JETS
+#using coffea and NanoAOD
+
+import awkward as ak
+import numpy as np
+import hist
+import matplotlib.pyplot as plt
+import mplhep as hep
+from coffea.nanoevents import NanoEventsFactory, NanoAODSchema
+
+NanoAODSchema.warn_missing_crossrefs = False
+
+# Load NanoAOD-style events
+events = NanoEventsFactory.from_root(
+    {"psd24.root": "Events"},
+    schemaclass=NanoAODSchema,
+    metadata={"dataset": "DYJets"},
+    mode="eager",
+).events()
+
+
+# Trigger mask
+trigger_mask = (
+    events.DST.PFScouting_JetHT |
+    events.DST.PFScouting_DoubleEG
+)
+
+triggered_events = events[trigger_mask] 
+jets = triggered_events.Jet
+
+# Jet selection: neutral EM fraction > 0.975 and nConstituents > 2
+good_jets = jets[
+    (jets.neEmEF > 0.975) &
+    (jets.nConstituents > 2)
+]
+
+# Require at least 2 selected jets per event
+has_two = ak.num(good_jets) >= 2
+good_jets = good_jets[has_two]
+
+# Sort jets by neutral EM fraction (descending)
+order = ak.argsort(good_jets.neEmEF, ascending=False)
+sorted_jets = good_jets[order]
+
+# Take leading two jets
+jet1 = sorted_jets[:, 0]
+jet2 = sorted_jets[:, 1]
+
+# Build four-vectors using awkward
+vec1 = ak.zip({
+    "pt": jet1.pt,
+    "eta": jet1.eta,
+    "phi": jet1.phi,
+    "mass": jet1.mass
+}, with_name="PtEtaPhiMLorentzVector")
+
+vec2 = ak.zip({
+    "pt": jet2.pt,
+    "eta": jet2.eta,
+    "phi": jet2.phi,
+    "mass": jet2.mass
+}, with_name="PtEtaPhiMLorentzVector")
+
+# Compute invariant mass
+dijet_mass = (vec1 + vec2).mass
+
+# Convert to numpy
+inv_mass = ak.to_numpy(dijet_mass)
+
+# Histogram
+masshist = hist.Hist(
+    hist.axis.Regular(30, 0, 200, label="2-Jet Invariant Mass [GeV]", name="mass")
+)
+masshist.fill(inv_mass)
+
+fig, ax = plt.subplots()
+masshist.plot1d(ax=ax)
+ax.set_ylabel("Count")
+ax.set_title("2-Jet Invariant Masses")
+plt.show()
